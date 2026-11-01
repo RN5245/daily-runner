@@ -102,45 +102,74 @@ def fetch(url, retries=12, timeout=30):
             time.sleep(2)
     raise last
 
+def write_log(success, url, detail, snippet=""):
+    """把本次结果写入仓库 last_run.md（失败也照写，便于下次先读）"""
+    import datetime
+    status = "✅ 成功" if success else "❌ 失败"
+    ts = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S (北京时间)")
+    snip = f"\n\n```\n{snippet[:200]}\n```" if snippet else ""
+    md = f"""# 最近一次运行结果
+
+- **状态**：{status}
+- **时间**：{ts}
+- **目标**：{url}
+- **详情**：{detail}
+{snip}
+
+> 本文件由 GitHub Actions 自动生成，每次运行覆写。历史版本见本文件的 commit 记录。
+"""
+    with open("last_run.md", "w", encoding="utf-8") as f:
+        f.write(md)
+
 def main():
     if len(sys.argv) < 2:
         print("usage: solve.py <URL>"); sys.exit(1)
     base = sys.argv[1].rstrip('/')
-    print(f"[1/3] 取挑战页 {base}/")
-    html = fetch(base + '/').decode('utf-8', 'ignore')
-    hexes = re.findall(r'toNumbers\("([0-9a-f]+)"\)', html)
-    if len(hexes) < 3:
-        print("::error::未检测到 JS 挑战，可能页面结构变了")
+    try:
+        print(f"[1/3] 取挑战页 {base}/")
+        html = fetch(base + '/').decode('utf-8', 'ignore')
+        hexes = re.findall(r'toNumbers\("([0-9a-f]+)"\)', html)
+        if len(hexes) < 3:
+            print("::error::未检测到 JS 挑战，可能页面结构变了")
+            write_log(False, base, "未检测到 JS 挑战（页面结构可能变了）")
+            sys.exit(1)
+        a, b, c = to_numbers(hexes[0]), to_numbers(hexes[1]), to_numbers(hexes[2])
+
+        print("[2/3] 拉 aes.js 并算 __test cookie")
+        fetch(base + '/aes.js')  # 触发下载（结果不重要，cookie 只用 a/b/c 算）
+        # slowAES.decrypt(c, CBC=2, a=key, b=iv) 单块: plaintext = AES_decrypt(c, key=a) XOR iv=b
+        dec = decrypt_block(c, a)
+        cookie = to_hex([dec[i] ^ b[i] for i in range(16)])
+        print(f"     __test = {cookie}")
+
+        print(f"[3/3] 带 cookie 取真页面 {base}/?i=1")
+        last_err = None
+        for _ in range(12):
+            try:
+                req = urllib.request.Request(base + '/?i=1', headers={"User-Agent": UA, "Cookie": "__test=" + cookie})
+                resp = urllib.request.urlopen(req, timeout=30)
+                body = resp.read()
+                code = resp.status
+                print(f"     HTTP {code}, 字节数 {len(body)}")
+                if code == 200 and len(body) > 200:
+                    snippet = body[:200].decode('utf-8', 'ignore')
+                    print("--- 真页面前 300 字节 ---")
+                    print(body[:300].decode('utf-8', 'ignore'))
+                    print("OK")
+                    write_log(True, base, f"HTTP {code}, 字节数 {len(body)}", snippet)
+                    return
+                last_err = f"code={code} size={len(body)}"
+            except Exception as e:
+                last_err = str(e)
+            time.sleep(2)
+        print(f"::error::取真页面失败: {last_err}")
+        write_log(False, base, f"取真页面失败: {last_err}")
         sys.exit(1)
-    a, b, c = to_numbers(hexes[0]), to_numbers(hexes[1]), to_numbers(hexes[2])
-
-    print("[2/3] 拉 aes.js 并算 __test cookie")
-    fetch(base + '/aes.js')  # 触发下载（结果不重要，cookie 只用 a/b/c 算）
-    # slowAES.decrypt(c, CBC=2, a=key, b=iv) 单块: plaintext = AES_decrypt(c, key=a) XOR iv=b
-    dec = decrypt_block(c, a)
-    cookie = to_hex([dec[i] ^ b[i] for i in range(16)])
-    print(f"     __test = {cookie}")
-
-    print(f"[3/3] 带 cookie 取真页面 {base}/?i=1")
-    last_err = None
-    for _ in range(12):
-        try:
-            req = urllib.request.Request(base + '/?i=1', headers={"User-Agent": UA, "Cookie": "__test=" + cookie})
-            resp = urllib.request.urlopen(req, timeout=30)
-            body = resp.read()
-            code = resp.status
-            print(f"     HTTP {code}, 字节数 {len(body)}")
-            if code == 200 and len(body) > 200:
-                print("--- 真页面前 300 字节 ---")
-                print(body[:300].decode('utf-8', 'ignore'))
-                print("OK")
-                return
-            last_err = f"code={code} size={len(body)}"
-        except Exception as e:
-            last_err = str(e)
-        time.sleep(2)
-    print(f"::error::取真页面失败: {last_err}")
-    sys.exit(1)
+    except SystemExit:
+        raise
+    except Exception as e:
+        write_log(False, base, f"未知异常: {e}")
+        raise
 
 if __name__ == "__main__":
     main()
