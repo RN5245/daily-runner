@@ -1,0 +1,66 @@
+name: daily-runner
+
+on:
+  # ---------- 定时触发（GitHub 强制 UTC 时区，北京时间 = UTC+8） ----------
+  # 每天 3 次，北京时间 09:17 / 16:43 / 22:05（相隔 5.5~6.5h，不扎堆）
+  # 每次再随机延后 0~10 分钟，避开整点洪峰、带随机感
+  schedule:
+    - cron: "17 1 * * *"    # 北京时间 09:17
+    - cron: "43 8 * * *"    # 北京时间 16:43
+    - cron: "5 14 * * *"    # 北京时间 22:05
+  # ---------- 手动触发（网页 Actions 页点 Run / CLI: gh workflow run daily-runner）----------
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "要访问的 URL（覆盖同名 Secret）"
+        required: false
+      jitter:
+        description: "随机延后上限（分钟），默认 10"
+        required: false
+        default: "10"
+
+# 防止重叠运行（同一时刻只跑一个）
+concurrency:
+  group: daily-runner
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 随机延后（0 ~ jitter 分钟）
+        run: |
+          JITTER="${{ github.event.inputs.jitter || '10' }}"
+          DELAY=$(( RANDOM % (JITTER * 60 + 1) ))
+          echo "随机延后 ${DELAY}s (jitter=${JITTER}m) ..."
+          sleep "$DELAY"
+
+      - name: 执行任务（访问指定网站）
+        env:
+          TARGET_URL: ${{ secrets.TARGET_URL }}      # 在仓库 Settings > Secrets 配置
+          EXTRA_TOKEN: ${{ secrets.EXTRA_TOKEN }}    # 可选：URL 需要的 token
+        run: |
+          URL="${{ github.event.inputs.url || env.TARGET_URL }}"
+          if [ -z "$URL" ]; then
+            echo "::error::未设置 TARGET_URL（仓库 Secrets）也没有手动传 url"
+            exit 1
+          fi
+          echo "目标: $URL"
+          CODE=$(curl -s -o /tmp/resp.txt -w '%{http_code}' -L --max-time 60 "$URL")
+          echo "HTTP 状态码: $CODE"
+          echo "--- 响应前 500 字节 ---"
+          head -c 500 /tmp/resp.txt
+          echo
+          # 非 2xx/3xx 视为失败
+          if [ "$CODE" -lt 200 ] || [ "$CODE" -ge 400 ]; then
+            echo "::error::访问失败 code=$CODE"
+            exit 1
+          fi
+          echo "OK"
